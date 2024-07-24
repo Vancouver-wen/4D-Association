@@ -1,0 +1,12 @@
+# python=3.9
+numpy
+opencv-contrib-python
+loguru
+networkx
+joblib
+torch
+torchvision
+tqdm
+natsort
+easydict
+matplotlib
