@@ -5,6 +5,7 @@ import json
 import time
 
 import numpy as np
+from joblib import Parallel,delayed
 
 from .camera import line2linedist, point2linedist,Camera
 from .openpose_detection import SKEL19DEF,SKEL25DEF
@@ -15,15 +16,13 @@ def welsch(c, x):
 
 class Clique():
 
-    def __init__(self, paf_id, proposal, score=-1) -> None:
+    def __init__(self, paf_id:int, proposal:list[int], score:float=-1) -> None:
         """class for limb clique, which is used for solve 4D graph.
 
         Args:
             paf_id (int): the paf index
-            paf index proposal (List):
-                a list of allocated bone index to the clique
-            score (float): the score of the clique, larger score will be
-            solve earlier
+            paf index proposal (List): a list of allocated bone index to the clique
+            score (float): the score of the clique, larger score will be solved earlier
         """
         self.paf_id = paf_id
         self.proposal = proposal
@@ -39,8 +38,10 @@ class Clique():
 class Voting():
 
     def __init__(self) -> None:
-        """vote class for clique it will record the kps haven been allocated
-        and it will be used to solve graph."""
+        """
+        vote class for clique 
+        it will record the kps haven been allocated and it will be used to solve graph.
+        """
         # 这里使用int8会导致数组越界 -> use int32
         self.fst = np.zeros(2, dtype=np.int32)
         self.sec = np.zeros(2, dtype=np.int32)
@@ -174,91 +175,82 @@ class GraphAssociate():
     def initialize(self):
         for kps_id in range(self.n_kps):
             for view in range(self.n_views):
-                self.m_assign_map[view][kps_id] = np.full(
-                    len(self.kps2d[view][kps_id]), -1)
+                self.m_assign_map[view][kps_id] = np.full(len(self.kps2d[view][kps_id]), -1)
 
         self.mpersons_map = {}
         for person_id in self.last_multi_kps3d:
             self.mpersons_map[person_id] = np.full((self.n_kps, self.n_views),-1)
 
-    def enumerate_cliques(self):
-        tmp_cliques = {i: [] for i in range(self.n_pafs)}
-        for paf_id in range(self.n_pafs):
-            nodes = self.m_bone_nodes[paf_id]
-            pick = [-1] * (self.n_views + 1)
-            available_node = {
-                i: {j: []
-                    for j in range(self.n_views + 1)}
-                for i in range(self.n_views + 1)
-            }
+    def enumerate_paf_cliques(self,paf_id):
+        tmp_cliques=[]
+        nodes = self.m_bone_nodes[paf_id]
+        pick = [-1] * (self.n_views + 1)
+        available_node = {
+            i: {j: []
+                for j in range(self.n_views + 1)}
+            for i in range(self.n_views + 1)
+        }
+        index = -1
+        while True:
+            if index >= 0 and pick[index] >= len(available_node[index][index]):
+                pick[index] = -1
+                index = index - 1
+                if index < 0:
+                    break
+                pick[index] += 1
 
-            # view_cnt = 0
-            index = -1
-            while True:
-                if index >= 0 and pick[index] >= len(
-                        available_node[index][index]):
-                    pick[index] = -1
-                    index = index - 1
-                    if index < 0:
-                        break
-                    pick[index] += 1
+            elif index == len(pick) - 1:
+                if sum(pick[:self.n_views]) != -self.n_views:
+                    clique = Clique(paf_id, [-1] * len(pick))
+                    for i in range(len(pick)):
+                        if pick[i] != -1:
+                            if i == len(pick) - 1:
+                                clique.proposal[i] = list(self.last_multi_kps3d.keys())[available_node[i][i][pick[i]]] # pid -> person_id
+                            else:
+                                clique.proposal[i] = available_node[i][i][pick[i]]
+                    clique.score = self.cal_clique_score(clique)
+                    tmp_cliques.append(clique)
+                pick[index] += 1
 
-                elif index == len(pick) - 1:
-                    if sum(pick[:self.n_views]) != -self.n_views:
-                        clique = Clique(paf_id, [-1] * len(pick))
-                        for i in range(len(pick)):
-                            if pick[i] != -1:
-                                if i == len(pick) - 1:
-                                    clique.proposal[i] = list(self.last_multi_kps3d.keys())[available_node[i][i][pick[i]]] # pid -> person_id
-                                else:
-                                    clique.proposal[i] = available_node[i][i][pick[i]]
-                            # clique.proposal[i] = available_node[i][i][pick[i]]
-                        clique.score = self.cal_clique_score(clique)
-                        tmp_cliques[paf_id].append(clique)
-                    pick[index] += 1
-
+            else:
+                index += 1
+                # update available nodes
+                if index == 0:
+                    for view in range(self.n_views):
+                        for bone in range(len(nodes[view])):
+                            available_node[0][view].append(bone)
+                    for pid in range(len(self.last_multi_kps3d)):
+                        available_node[0][self.n_views].append(pid)
                 else:
-                    index += 1
-                    # update available nodes
-                    if index == 0:
-                        for view in range(self.n_views):
-                            for bone in range(len(nodes[view])):
-                                available_node[0][view].append(bone)
-                        for pid in range(len(self.last_multi_kps3d)):
-                            available_node[0][self.n_views].append(pid)
+                    # epipolar constrain
+                    if pick[index - 1] >= 0:
+                        for view in range(index, self.n_views):
+                            available_node[index][view] = []
+                            epiEdges = self.m_bone_epi_edges[paf_id][index - 1][view]
+                            bone1_id = available_node[index -1][index -1][pick[index -1]]
+                            for bone2_id in available_node[index -1][view]:
+                                if epiEdges[bone1_id, bone2_id] > 0:
+                                    available_node[index][view].append(bone2_id)
                     else:
-                        # epipolar constrain
-                        if pick[index - 1] >= 0:
-                            for view in range(index, self.n_views):
-                                available_node[index][view] = []
-                                epiEdges = self.m_bone_epi_edges[paf_id][
-                                    index - 1][view]
-                                bone1_id = available_node[index -
-                                                          1][index -
-                                                             1][pick[index -
-                                                                     1]]
-                                for bone2_id in available_node[index -
-                                                               1][view]:
-                                    if epiEdges[bone1_id, bone2_id] > 0:
-                                        available_node[index][view].append(
-                                            bone2_id)
-                        else:
-                            for view in range(index, self.n_views):
-                                available_node[index][view] = available_node[
-                                    index - 1][view][:]
-                        # temporal constrain
-                        if pick[self.n_views - 1] > 0:
-                            available_node[index][self.n_views] = []
-                            temp_edge = self.m_bone_temp_edges[paf_id][
-                                self.n_views - 1]
-                            bone1_id = available_node[self.n_views -1][self.n_views -1][pick[self.n_views -1]]
-                            for pid in available_node[index - 1][self.n_views]:
-                                if temp_edge[pid, bone1_id] > 0:
-                                    available_node[index][self.n_views].append(pid)
-                        else:
-                            available_node[index][
-                                self.n_views] = available_node[index - 1][self.n_views][:]
+                        for view in range(index, self.n_views):
+                            available_node[index][view] = available_node[index - 1][view][:]
+                    # temporal constrain
+                    if pick[self.n_views - 1] > 0:
+                        available_node[index][self.n_views] = []
+                        temp_edge = self.m_bone_temp_edges[paf_id][self.n_views - 1]
+                        bone1_id = available_node[self.n_views -1][self.n_views -1][pick[self.n_views -1]]
+                        for pid in available_node[index - 1][self.n_views]:
+                            if temp_edge[pid, bone1_id] > 0:
+                                available_node[index][self.n_views].append(pid)
+                    else:
+                        available_node[index][self.n_views] = available_node[index - 1][self.n_views][:]
+        return tmp_cliques
 
+    def enumerate_cliques(self):
+        tmp_cliques=Parallel(n_jobs=self.n_pafs,backend="threading")(
+            delayed(self.enumerate_paf_cliques)(paf_id)
+            for paf_id in range(self.n_pafs)
+        )
         for paf_id in range(self.n_pafs):
             self.cliques.extend(tmp_cliques[paf_id])
         heapq.heapify(self.cliques)

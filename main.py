@@ -104,7 +104,7 @@ def main():
     fps=FPS()
     fourcc = cv2.VideoWriter_fourcc(*'XVID')
     save_name="my_vis"
-    out = cv2.VideoWriter(f'./{save_name}.avi',fourcc, 30.0, (5808,2050),True)
+    out = cv2.VideoWriter(f'./myvis/{save_name}.avi',fourcc, 30.0, (5808,2050),True)
     graph_construct=GraphConstruct(
         cameras=cam_params,
         definition=SKEL19DEF

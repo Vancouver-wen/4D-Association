@@ -4,6 +4,8 @@ import io
 
 import cv2
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 
 from utils.imageConcat import show_multi_imgs
@@ -90,5 +92,5 @@ def vis_3d_person(
     image=cv2.resize(image,None,fx=ratio,fy=ratio,interpolation=cv2.INTER_AREA)
     frame=cv2.hconcat([frame,image])
     frame=cv2.resize(frame,None,fx=0.5,fy=0.5,interpolation=cv2.INTER_AREA)
-    cv2.imwrite(f'./{save_name}.jpg',frame)
+    cv2.imwrite(f'./myvis/{save_name}.jpg',frame)
     return frame
