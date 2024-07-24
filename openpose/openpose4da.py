@@ -14,7 +14,7 @@ from .model import bodypose_25_model
 from association.openpose_detection import SKEL25DEF
 
 class torch_openpose(nn.Module):
-    def __init__(self,model_body25 = './weight/body_25.pth',try_cuda=True,lock=None):
+    def __init__(self,model_body25 = './weight/body_25.pth',paf_thres=0.4,try_cuda=True,lock=None):
         super().__init__()
         self.try_cuda=try_cuda
         self.lock=lock
@@ -56,6 +56,8 @@ class torch_openpose(nn.Module):
         ]
         self.njoint = SKEL25DEF.joint_size + 1 # 最后一个是背景
         self.npaf = SKEL25DEF.paf_size*2
+        self.maxpooling=nn.MaxPool2d(kernel_size=3,stride=1,padding=1)
+        self.paf_thres=paf_thres
 
     def get_heatmap_and_paf(self,m,multiplier,oriImg,stride,padValue):
         scale = multiplier[m]
@@ -95,19 +97,26 @@ class torch_openpose(nn.Module):
     def get_peak(self,heatmap_avg,part,thre1):
         map_ori = heatmap_avg[:, :, part]
         one_heatmap = gaussian_filter(map_ori, sigma=3)
-
-        map_left = np.zeros(one_heatmap.shape)
-        map_left[1:, :] = one_heatmap[:-1, :]
-        map_right = np.zeros(one_heatmap.shape)
-        map_right[:-1, :] = one_heatmap[1:, :]
-        map_up = np.zeros(one_heatmap.shape)
-        map_up[:, 1:] = one_heatmap[:, :-1]
-        map_down = np.zeros(one_heatmap.shape)
-        map_down[:, :-1] = one_heatmap[:, 1:]
-
-        peaks_binary = np.logical_and.reduce(
-            (one_heatmap >= map_left, one_heatmap >= map_right, one_heatmap >= map_up, one_heatmap >= map_down, one_heatmap > thre1))
+        
+        # this method is too slow
+        # map_left = np.zeros(one_heatmap.shape)
+        # map_left[1:, :] = one_heatmap[:-1, :]
+        # map_right = np.zeros(one_heatmap.shape)
+        # map_right[:-1, :] = one_heatmap[1:, :]
+        # map_up = np.zeros(one_heatmap.shape)
+        # map_up[:, 1:] = one_heatmap[:, :-1]
+        # map_down = np.zeros(one_heatmap.shape)
+        # map_down[:, :-1] = one_heatmap[:, 1:]
+        # peaks_binary_o = np.logical_and.reduce((one_heatmap >= map_left, one_heatmap >= map_right, one_heatmap >= map_up, one_heatmap >= map_down, one_heatmap > thre1))
+        # peaks_o = list(zip(np.nonzero(peaks_binary_o)[1], np.nonzero(peaks_binary_o)[0]))  # note reverse
+        # use maxpooling to get peak
+        height,width=one_heatmap.shape
+        tmp_heatmap = self.maxpooling(torch.from_numpy(one_heatmap).unsqueeze(dim=0)).numpy().squeeze()[:height,:width]
+        peaks_binary = np.logical_and.reduce((one_heatmap==tmp_heatmap, one_heatmap > thre1))
         peaks = list(zip(np.nonzero(peaks_binary)[1], np.nonzero(peaks_binary)[0]))  # note reverse
+        # print(peaks_o)
+        # print(peaks)
+        # print('---')
         peaks_with_score = [list(x)+[map_ori[x[1], x[0]]] for x in peaks]
         return peaks_with_score
     
@@ -133,6 +142,8 @@ class torch_openpose(nn.Module):
                 score_midpts = np.multiply(vec_x, vec[0]) + np.multiply(vec_y, vec[1]) # 两个单位向量的点乘
                 score_paf=score_midpts.mean()
                 score_paf=min(max(score_paf,0.0),1.0) # 限定 paf score 的范围为 0~1
+                if score_paf<self.paf_thres:
+                    score_paf=0
                 connections.append(score_paf)
             connection_candidate.append(connections)
         return connection_candidate
@@ -156,7 +167,7 @@ class torch_openpose(nn.Module):
         paf_avg=np.mean(pafs,axis=0)
 
         # heatmap_avg paf_avg 是融合了多尺度的 heatmap 与 paf
-        all_peaks=Parallel(n_jobs=self.njoint-1,backend="threading")(
+        all_peaks=Parallel(n_jobs=self.njoint-1,backend="threading")( # n_jobs=self.njoint-1
             delayed(self.get_peak)(heatmap_avg,part,thre1)
             for part in range(self.njoint - 1)
         )

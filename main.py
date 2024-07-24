@@ -41,7 +41,7 @@ class FourDagDataset(Dataset):
             folders=natsorted(filter(lambda x:os.path.isdir(x),glob.glob(os.path.join('data',config.dataset,'video','*'))))
         )
         model_ckpt_path="./openpose/weight/body_25.pth"
-        self.openpose=torch_openpose(model_ckpt_path,try_cuda=True)
+        self.openpose=torch_openpose(model_ckpt_path,paf_thres=0.4,try_cuda=True)
         self.skip_num=skip_num
     
     def __len__(self):
@@ -55,19 +55,15 @@ class FourDagDataset(Dataset):
             delayed(self.image_path_to_openpose_detection)(image_path)
             for image_path in image_list
         )
-        # images=[cv2.imread(image_path) for image_path in image_list]
-        # openpose_detections=[]
-        # for image in images:
-        #     openpose_detection=OpenposeDetection()
-        #     openpose_detection.joints,openpose_detection.pafs=self.openpose(image) # openpose infer
-        #     openpose_detection.mapping()
-        #     openpose_detections.append(openpose_detection)
         return image_list,openpose_detections
 
     def image_path_to_openpose_detection(self,image_path):
         image=cv2.imread(image_path)
         openpose_detection=OpenposeDetection()
-        openpose_detection.joints,openpose_detection.pafs=self.openpose(image) # openpose infer
+        openpose_detection.joints,openpose_detection.pafs=self.openpose.forward( # openpose infer
+            oriImg=image,
+            scale_search=[0.7,1.0,2.0]
+        ) 
         openpose_detection.mapping()
         return openpose_detection
 

@@ -6,6 +6,7 @@ import time
 
 import numpy as np
 from joblib import Parallel,delayed
+from natsort import natsorted
 
 from .camera import line2linedist, point2linedist,Camera
 from .openpose_detection import SKEL19DEF,SKEL25DEF
@@ -33,6 +34,13 @@ class Clique():
             return True
         else:
             return False
+        
+    def __str__(self) -> str:
+        return str({
+            'paf_id':self.paf_id,
+            'proposal':self.proposal,
+            'score':self.score
+        })
 
 
 class Voting():
@@ -182,7 +190,7 @@ class GraphAssociate():
             self.mpersons_map[person_id] = np.full((self.n_kps, self.n_views),-1)
 
     def enumerate_paf_cliques(self,paf_id):
-        tmp_cliques=[]
+        cliques=[]
         nodes = self.m_bone_nodes[paf_id]
         pick = [-1] * (self.n_views + 1)
         available_node = {
@@ -198,10 +206,13 @@ class GraphAssociate():
                 if index < 0:
                     break
                 pick[index] += 1
-
             elif index == len(pick) - 1:
                 if sum(pick[:self.n_views]) != -self.n_views:
-                    clique = Clique(paf_id, [-1] * len(pick))
+                    clique = Clique(
+                        paf_id=paf_id, 
+                        proposal=[-1] * len(pick),
+                        score=-1.0
+                    )
                     for i in range(len(pick)):
                         if pick[i] != -1:
                             if i == len(pick) - 1:
@@ -209,9 +220,8 @@ class GraphAssociate():
                             else:
                                 clique.proposal[i] = available_node[i][i][pick[i]]
                     clique.score = self.cal_clique_score(clique)
-                    tmp_cliques.append(clique)
+                    cliques.append(clique)
                 pick[index] += 1
-
             else:
                 index += 1
                 # update available nodes
@@ -244,10 +254,12 @@ class GraphAssociate():
                                 available_node[index][self.n_views].append(pid)
                     else:
                         available_node[index][self.n_views] = available_node[index - 1][self.n_views][:]
-        return tmp_cliques
+        cliques=list(filter(lambda x:(np.array(x.proposal)!=-1).sum()>=2,cliques))
+        cliques=natsorted(cliques,key=lambda x:x.score,reverse=True)[:min(100,len(cliques))]
+        return cliques
 
     def enumerate_cliques(self):
-        tmp_cliques=Parallel(n_jobs=self.n_pafs,backend="threading")(
+        tmp_cliques=Parallel(n_jobs=self.n_pafs)( # n_jobs=self.n_pafs
             delayed(self.enumerate_paf_cliques)(paf_id)
             for paf_id in range(self.n_pafs)
         )
