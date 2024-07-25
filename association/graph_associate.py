@@ -290,7 +290,7 @@ class GraphAssociate():
             def check_cnt():
                 cnt = 0
                 for i in range(2):
-                    _cnt = self.check_kps_compatibility(view, kps_pair[i], node[i], person_id)
+                    _cnt = self.check_kpt_compatibility(view, kps_pair[i], node[i], person_id)
                     if _cnt == -1:
                         return -1
                     cnt += _cnt
@@ -352,16 +352,13 @@ class GraphAssociate():
             voting = self.clique2voting(clique, voting)
             voting.parse()
             # import pdb;pdb.set_trace()
+            # 一个 limb_clique 应该包含两个 keypoint_clique: A & B
             if sum(voting.fst_cnt) == 0:
                 # ('1. A & B not assigned yet')
                 # limb_clique中 两个keypoint_clique都没有被分配 person_id -> 创建新的person_id
                 if self.allocFlag(clique,nodes,kps_pair):
                     person = np.full((self.n_kps, self.n_views), -1)
-                    if len(self.mpersons_map) == 0:
-                        person_id = 0
-                    else:
-                        person_id = max(self.mpersons_map) + 1
-
+                    person_id=0 if len(self.mpersons_map) == 0 else max(self.mpersons_map) + 1
                     for view in range(self.n_views):
                         if clique.proposal[view] >= 0:
                             node = nodes[view][clique.proposal[view]]
@@ -381,8 +378,8 @@ class GraphAssociate():
                         node = nodes[view][clique.proposal[view]]
                         unassignj_candidata = node[1 - valid_id]
                         assigned = self.m_assign_map[view][kps_pair[valid_id]][node[valid_id]]
-                        if assigned == master_id:
-                            if person[unassignj_id, view] == -1 and self.check_kps_compatibility(view, unassignj_id,unassignj_candidata, master_id) >= 0:
+                        if assigned == master_id: # 已经被分配的person_id的点 与 该点所在clique投票得到的person_id 是一致
+                            if person[unassignj_id, view] == -1 and self.check_kpt_compatibility(view, unassignj_id,unassignj_candidata, master_id) >= 0:
                                 person[unassignj_id,view] = unassignj_candidata
                                 self.m_assign_map[view][unassignj_id][unassignj_candidata] = master_id
                             else:
@@ -390,7 +387,8 @@ class GraphAssociate():
                         elif assigned == -1 and voting.fst_cnt[valid_id] >= 2 and voting.sec_cnt[valid_id] == 0\
                                 and (person[kps_pair[0], view] == -1 or person[kps_pair[0], view] == node[0])\
                                 and (person[kps_pair[1], view] == -1 or person[kps_pair[1], view] == node[1]):
-                            if self.check_kps_compatibility(view, kps_pair[0], node[0], master_id) >= 0 and self.check_kps_compatibility(view, kps_pair[1], node[1],master_id) >= 0:
+                            # keypoint还没有被分配person_id 并且 clique投票了一个person_id
+                            if self.check_kpt_compatibility(view, kps_pair[0], node[0], master_id) >= 0 and self.check_kpt_compatibility(view, kps_pair[1], node[1],master_id) >= 0:
                                 for i in range(2):
                                     person[kps_pair[i], view] = node[i]
                                     self.m_assign_map[view][kps_pair[i]][node[i]] = master_id
@@ -415,7 +413,7 @@ class GraphAssociate():
                         ]
                         if assign_id[0] == master_id and assign_id[1] == master_id:
                             continue
-                        elif self.check_kps_compatibility(view, kps_pair[0], node[0], master_id) == -1 or self.check_kps_compatibility(view, kps_pair[1], node[1], master_id) == -1:
+                        elif self.check_kpt_compatibility(view, kps_pair[0], node[0], master_id) == -1 or self.check_kpt_compatibility(view, kps_pair[1], node[1], master_id) == -1:
                             _proposal[view] = clique.proposal[view]
                         elif (assign_id[0] == master_id and assign_id[1]== -1) or (assign_id[0] == -1 and assign_id[1] == master_id):
                             valid_id = 0 if assign_id[1] == -1 else 1
@@ -521,7 +519,8 @@ class GraphAssociate():
         var = sum(np.array(clique.proposal[:self.n_views]) >= 0)
         view_score = welsch(self.c_view_cnt, var)
         # hier score ignored
-        return (self.w_epi * epi_score + self.w_temp * temp_score + self.w_paf * paf_score + self.w_view * view_score) / (self.w_epi + self.w_temp + self.w_paf + self.w_view)
+        score=(self.w_epi * epi_score + self.w_temp * temp_score + self.w_paf * paf_score + self.w_view * view_score) / (self.w_epi + self.w_temp + self.w_paf + self.w_view)
+        return score
 
     def check_cnt(self, clique, kps_pair, nodes, person_id):
         """
@@ -533,29 +532,29 @@ class GraphAssociate():
             index = clique.proposal[view]
             if index != -1:
                 for i in range(2):
-                    _cnt = self.check_kps_compatibility(view, kps_pair[i], nodes[view][index][i], person_id)
+                    _cnt = self.check_kpt_compatibility(view, kps_pair[i], nodes[view][index][i], person_id)
                     if _cnt == -1:
                         return -1
                     else:
                         cnt += _cnt
         return cnt
 
-    def check_kps_compatibility(self, view, kps_id, candidate, pid):
+    def check_kpt_compatibility(self, view, kpt_id, keypoint_index, pid):
         if pid not in self.mpersons_map:
             return -1
         person = self.mpersons_map[pid]
         check_cnt = 0
-        if person[kps_id][view] != -1 and person[kps_id][view] != candidate:
+        if person[kpt_id][view] != -1 and person[kpt_id][view] != keypoint_index:
             # 关节点的id信息冲突了
             return -1
 
-        for paf_id in self.m_kps2paf[kps_id]:
-            check_kps_id = self.paf_dict[paf_id][0] + self.paf_dict[paf_id][1] - kps_id
+        for paf_id in self.m_kps2paf[kpt_id]:
+            check_kps_id = self.paf_dict[paf_id][0] + self.paf_dict[paf_id][1] - kpt_id
             if person[check_kps_id, view] == -1:
                 continue
-            kps_candidate1 = candidate
+            kps_candidate1 = keypoint_index
             kps_candidate2 = person[check_kps_id, view]
-            if kps_id == self.paf_dict[paf_id][1]:
+            if kpt_id == self.paf_dict[paf_id][1]:
                 kps_candidate1, kps_candidate2 = kps_candidate2, kps_candidate1
             # 两个端点连线的limb的 paf >0
             if self.pafs[view][paf_id][kps_candidate1][kps_candidate2] > 0:
@@ -564,10 +563,10 @@ class GraphAssociate():
                 return -1
 
         for i in range(self.n_views):
-            if i == view or person[kps_id, i] == -1:
+            if i == view or person[kpt_id, i] == -1:
                 continue
             # 线线距离 也要满足 约束
-            if self.m_epi_edges[kps_id][view][i][candidate,int(person[kps_id, i])] > 0:
+            if self.m_epi_edges[kpt_id][view][i][keypoint_index,int(person[kpt_id, i])] > 0:
                 check_cnt = check_cnt + 1
             else:
                 return -1

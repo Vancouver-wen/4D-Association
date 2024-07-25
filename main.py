@@ -31,7 +31,7 @@ from visualize.vis_3d_person import vis_3d_person
 from openpose.openpose4da import torch_openpose
 
 class FourDagDataset(Dataset):
-    def __init__(self,config,skip_num=0) -> None:
+    def __init__(self,config,skip_num=0,paf_thres=0.4) -> None:
         super().__init__()
         self.cam_params_origin=get_camera_params(
             calibration_json_path=os.path.join('data',config.dataset,'calibration.json')
@@ -41,7 +41,7 @@ class FourDagDataset(Dataset):
             folders=natsorted(filter(lambda x:os.path.isdir(x),glob.glob(os.path.join('data',config.dataset,'video','*'))))
         )
         model_ckpt_path="./openpose/weight/body_25.pth"
-        self.openpose=torch_openpose(model_ckpt_path,paf_thres=0.4,try_cuda=True)
+        self.openpose=torch_openpose(model_ckpt_path,paf_thres=paf_thres,try_cuda=True)
         self.skip_num=skip_num
     
     def __len__(self):
@@ -88,7 +88,7 @@ def main():
         txt_paths=natsorted(glob.glob(os.path.join('data',config.dataset,'detection','*.txt')))
     )
     skip_num=300 # debug
-    fourDagDataset=FourDagDataset(config,skip_num)
+    fourDagDataset=FourDagDataset(config,skip_num,paf_thres=0.3)
     fourDagDataloader=DataLoader(
         dataset=fourDagDataset,
         batch_size=1,
@@ -122,6 +122,7 @@ def main():
         fps() # 统计并打印 FPS
         assert len(cam_params)==len(image_list)
         assert len(cam_params)==len(openpose_detection_list)
+        last_multi_kps3d=dict() # 去除时序信息
         graph_4d=graph_construct.__call__(
             kps2d=[openpose_detection.joints for openpose_detection in openpose_detection_list],
             pafs=[openpose_detection.pafs for openpose_detection in openpose_detection_list],
