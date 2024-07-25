@@ -51,18 +51,20 @@ class Voting():
         it will record the kps haven been allocated and it will be used to solve graph.
         """
         # 这里使用int8会导致数组越界 -> use int32
-        self.fst = np.zeros(2, dtype=np.int32)
-        self.sec = np.zeros(2, dtype=np.int32)
-        self.fst_cnt = np.zeros(2, dtype=np.int32)
-        self.sec_cnt = np.zeros(2, dtype=np.int32)
+        self.fst = np.zeros(2, dtype=np.int32) # first
+        self.sec = np.zeros(2, dtype=np.int32) # second
+        self.fst_cnt = np.zeros(2, dtype=np.int32) # first count
+        self.sec_cnt = np.zeros(2, dtype=np.int32) # second count
         self.vote = dict()
 
     def parse(self):
+        """
+        统计self.vote中前两位的投票数目
+        """
         self.fst_cnt = np.zeros(2)
         self.sec_cnt = np.zeros(2)
         if len(self.vote) == 0:
             return
-
         _vote = copy.deepcopy(self.vote)
         for i in range(2):
             for index in range(2):
@@ -75,6 +77,15 @@ class Voting():
                     self.sec[index] = person_id
                     self.sec_cnt[index] = _vote[person_id][index]
                 _vote[person_id][index] = 0
+    
+    def __str__(self) -> str:
+        return str({
+            'self.fst':self.fst,
+            'self.sec':self.sec,
+            'self.fst_cnt':self.fst_cnt,
+            'self.sec_cnt':self.sec_cnt,
+            'self.vote':self.vote
+        })
 
 
 class GraphAssociate():
@@ -134,7 +145,7 @@ class GraphAssociate():
             self.m_kps2paf[kps_pair[0]].append(paf_id)
             self.m_kps2paf[kps_pair[1]].append(paf_id)
 
-        self.m_assign_map = {
+        self.m_assign_map = { # m_assign_map 记录每个 kpts被分配到哪一个 person_id。 使用-1表示没有被分配 person_id
             i: {j: []
                 for j in range(self.n_kps)}
             for i in range(self.n_views)
@@ -256,6 +267,7 @@ class GraphAssociate():
                         available_node[index][self.n_views] = available_node[index - 1][self.n_views][:]
         cliques=list(filter(lambda x:(np.array(x.proposal)!=-1).sum()>=2,cliques))
         cliques=natsorted(cliques,key=lambda x:x.score,reverse=True)[:min(100,len(cliques))]
+        # import pdb;pdb.set_trace()
         return cliques
 
     def enumerate_cliques(self):
@@ -267,72 +279,83 @@ class GraphAssociate():
             self.cliques.extend(tmp_cliques[paf_id])
         heapq.heapify(self.cliques)
 
+    def allocFlag(self,clique,nodes,kps_pair):
+        if sum(np.array(clique.proposal) >= 0) == 0:
+            return True
+        view_var = max(clique.proposal)
+        view = clique.proposal.index(view_var)
+        node = nodes[view][clique.proposal[view]]
+        person_candidate = []
+        for person_id in self.mpersons_map:
+            def check_cnt():
+                cnt = 0
+                for i in range(2):
+                    _cnt = self.check_kps_compatibility(view, kps_pair[i], node[i], person_id)
+                    if _cnt == -1:
+                        return -1
+                    cnt += _cnt
+                return cnt
+            cntt = check_cnt()
+            if cntt >= self.min_check_cnt:
+                person_candidate.append([cntt, person_id])
+        if len(person_candidate) == 0:
+            return True
+        person_id = max(person_candidate)[1]
+        person = self.mpersons_map[person_id]
+        for i in range(2):
+            person[kps_pair[i], view] = node[i]
+            self.m_assign_map[view][kps_pair[i]][node[i]] = person_id
+
+        self.mpersons_map[person_id] = person
+        return False
+
     def assign_top_clique(self):
+        """
+        clique:
+            {'paf_id': 6, 'proposal': [0, 1, 1, 0, -1, 2, -1], 'score': 0.6756603975043303}
+        nodes:
+            {0: [(0, 0), (1, 1), (2, 2)], 1: [(0, 1), (1, 2), (2, 3)], 2: [(1, 1), (2, 2)], 3: [(0, 1), (1, 2), (1, 3)], 4: [(0, 0), (1, 1)], 5: [(0, 1), (0, 2), (1, 0), (2, 2)]}
+        kps_pair:
+            [8, 14]
+        """
         clique = heapq.heappop(self.cliques)
         nodes = self.m_bone_nodes[clique.paf_id]
         kps_pair = self.paf_dict[clique.paf_id]
-        if clique.proposal[self.n_views] != -1:
+        if clique.proposal[self.n_views] != -1: 
+            # 在时序关系中找到了对应的骨骼(这个骨骼带有person_id信息)
             person_id = clique.proposal[self.n_views]
-            if self.check_cnt(clique, kps_pair, nodes, person_id) != -1:
+            if self.check_cnt(clique, kps_pair, nodes, person_id) != -1: # 检查兼容性
                 person = self.mpersons_map[person_id]
+                # 1. 如果self.mersons_map[person_id] 全是 -1 , 则 check_cnt 一定能通过
+                # 2. 否则 就会检查与现有的 self.mpersons_map[person_id] 的兼容性
+                # 3. 如果兼容性检查通过, 则 更新合并关键点
                 _proposal = [-1] * (self.n_views + 1)
                 for view in range(self.n_views):
                     if clique.proposal[view] != -1:
                         node = nodes[view][clique.proposal[view]]
-                        assign = (self.m_assign_map[view][kps_pair[0]][node[0]],self.m_assign_map[view][kps_pair[1]][node[1]])
-                        if (assign[0] == -1 or assign[0] == person_id) and (assign[1] == -1 or assign[1] == person_id):
+                        assign = ( self.m_assign_map[view][kps_pair[0]][node[0]] , self.m_assign_map[view][kps_pair[1]][node[1]] ) 
+                        if (assign[0] == -1 or assign[0] == person_id) and (assign[1] == -1 or assign[1] == person_id): # 两个端点都没有被分配 -> 合并
                             for i in range(2):
                                 person[kps_pair[i], view] = node[i]
                                 self.m_assign_map[view][kps_pair[i]][node[i]] = person_id
                         else:
-                            _proposal[view] = clique.proposal[view]
+                            _proposal[view] = clique.proposal[view] # 任一个端点已经被分配了 -> 该limb需要重新塞到 heap 中
                 self.mpersons_map[person_id] = person
                 self.push_clique(clique.paf_id, _proposal[:])
-
             else:
                 _proposal = clique.proposal
-                _proposal[self.n_views] = -1
+                _proposal[self.n_views] = -1 # 不兼容 -> 剥夺 时序骨骼信息
                 self.push_clique(clique.paf_id, _proposal[:])
-
         else:
+            # 在时序关系中没有找到对应的骨骼
             voting = Voting()
             voting = self.clique2voting(clique, voting)
             voting.parse()
-
+            # import pdb;pdb.set_trace()
             if sum(voting.fst_cnt) == 0:
-
-                def allocFlag():
-                    if sum(np.array(clique.proposal) >= 0) == 0:
-                        return True
-                    view_var = max(clique.proposal)
-                    view = clique.proposal.index(view_var)
-                    node = nodes[view][clique.proposal[view]]
-                    person_candidate = []
-                    for person_id in self.mpersons_map:
-                        def check_cnt():
-                            cnt = 0
-                            for i in range(2):
-                                _cnt = self.check_kps_compatibility(view, kps_pair[i], node[i], person_id)
-                                if _cnt == -1:
-                                    return -1
-                                cnt += _cnt
-                            return cnt
-                        cntt = check_cnt()
-                        if cntt >= self.min_check_cnt:
-                            person_candidate.append([cntt, person_id])
-                    if len(person_candidate) == 0:
-                        return True
-                    person_id = max(person_candidate)[1]
-                    person = self.mpersons_map[person_id]
-                    for i in range(2):
-                        person[kps_pair[i], view] = node[i]
-                        self.m_assign_map[view][kps_pair[i]][node[i]] = person_id
-
-                    self.mpersons_map[person_id] = person
-                    return False
-
                 # ('1. A & B not assigned yet')
-                if allocFlag():
+                # limb_clique中 两个keypoint_clique都没有被分配 person_id -> 创建新的person_id
+                if self.allocFlag(clique,nodes,kps_pair):
                     person = np.full((self.n_kps, self.n_views), -1)
                     if len(self.mpersons_map) == 0:
                         person_id = 0
@@ -346,7 +369,6 @@ class GraphAssociate():
                                 person[kps_pair[i], view] = node[i]
                                 self.m_assign_map[view][kps_pair[i]][node[i]] = person_id
                     self.mpersons_map[person_id] = person
-
             elif min(voting.fst_cnt) == 0:
                 # ('2. A assigned but not B: Add B to person with A ')
                 valid_id = 0 if voting.fst_cnt[0] > 0 else 1
@@ -365,7 +387,6 @@ class GraphAssociate():
                                 self.m_assign_map[view][unassignj_id][unassignj_candidata] = master_id
                             else:
                                 continue
-
                         elif assigned == -1 and voting.fst_cnt[valid_id] >= 2 and voting.sec_cnt[valid_id] == 0\
                                 and (person[kps_pair[0], view] == -1 or person[kps_pair[0], view] == node[0])\
                                 and (person[kps_pair[1], view] == -1 or person[kps_pair[1], view] == node[1]):
@@ -377,11 +398,9 @@ class GraphAssociate():
                                 _proposal[view] = clique.proposal[view]
                         else:
                             _proposal[view] = clique.proposal[view]
-
                 self.mpersons_map[master_id] = person
                 if _proposal != clique.proposal:
                     self.push_clique(clique.paf_id, _proposal[:])
-
             elif voting.fst[0] == voting.fst[1]:
                 # ('4. A & B already assigned to same person')
                 master_id = voting.fst[0]
@@ -398,7 +417,6 @@ class GraphAssociate():
                             continue
                         elif self.check_kps_compatibility(view, kps_pair[0], node[0], master_id) == -1 or self.check_kps_compatibility(view, kps_pair[1], node[1], master_id) == -1:
                             _proposal[view] = clique.proposal[view]
-
                         elif (assign_id[0] == master_id and assign_id[1]== -1) or (assign_id[0] == -1 and assign_id[1] == master_id):
                             valid_id = 0 if assign_id[1] == -1 else 1
                             unassignj_id = kps_pair[1 - valid_id]
@@ -414,11 +432,9 @@ class GraphAssociate():
                                 self.m_assign_map[view][kps_pair[i]][node[i]] = master_id
                         else:
                             _proposal[view] = clique.proposal[view]
-
                     if _proposal != clique.proposal:
                         self.push_clique(clique.paf_id, _proposal[:])
                 self.mpersons_map[master_id] = person
-
             else:
                 # ('5. A & B already assigned to different people')
                 for index in range(2):
@@ -426,7 +442,6 @@ class GraphAssociate():
                         master_id = min(voting.fst[index], voting.sec[index])
                         slave_id = max(voting.fst[index], voting.sec[index])
                         assert slave_id <= max(self.mpersons_map)
-
                         if self.check_person_compatibility(master_id, slave_id) >= 0:
                             self.merge_person(master_id, slave_id)
                             voting = self.clique2voting(clique, voting)
@@ -437,14 +452,12 @@ class GraphAssociate():
                             iter = max(voting.vote,key=lambda x: voting.vote[x][index])
                             voting.sec[index] = iter
                             voting.sec_cnt[index] = voting.vote[iter][index]
-
                 if voting.fst[0] != voting.fst[1]:
                     conflict = [0] * self.n_views
                     master_id = min(voting.fst)
                     slave_id = max(voting.fst)
                     for view in range(self.n_views):
                         conflict[view] = 1 if self.check_person_compatibility_sview(master_id, slave_id, view) == -1 else 0
-
                     if sum(conflict) == 0:
                         self.merge_person(master_id, slave_id)
                         _proposal = [-1] * (self.n_views + 1)
@@ -460,11 +473,9 @@ class GraphAssociate():
                         _proposal_pair = np.full((self.n_views + 1, 2), -1)
                         for i in range(len(conflict)):
                             _proposal_pair[i, conflict[i]] = clique.proposal[i]
-
                         if min(_proposal_pair[:, 0]) >= 0 and min(_proposal_pair[:, 1]) >= 0:
                             self.push_clique(clique.paf_id,_proposal_pair[:, 0].copy())
                             self.push_clique(clique.paf_id,_proposal_pair[:, 1].copy())
-
                         elif sum(np.array(clique.proposal[:self.n_views]) >= 0) > 1:
                             for i in range(len(conflict)):
                                 _proposal = [-1] * (self.n_views + 1)
@@ -513,7 +524,11 @@ class GraphAssociate():
         return (self.w_epi * epi_score + self.w_temp * temp_score + self.w_paf * paf_score + self.w_view * view_score) / (self.w_epi + self.w_temp + self.w_paf + self.w_view)
 
     def check_cnt(self, clique, kps_pair, nodes, person_id):
-        cnt = 0
+        """
+        时序骨骼的两个端点 与 该clique 不允许发生一个冲突
+        如果有冲突,就应剥夺clique中被分配的person_id
+        """
+        cnt = 0 # cnt -> count
         for view in range(self.n_views):
             index = clique.proposal[view]
             if index != -1:
@@ -531,6 +546,7 @@ class GraphAssociate():
         person = self.mpersons_map[pid]
         check_cnt = 0
         if person[kps_id][view] != -1 and person[kps_id][view] != candidate:
+            # 关节点的id信息冲突了
             return -1
 
         for paf_id in self.m_kps2paf[kps_id]:
@@ -541,7 +557,7 @@ class GraphAssociate():
             kps_candidate2 = person[check_kps_id, view]
             if kps_id == self.paf_dict[paf_id][1]:
                 kps_candidate1, kps_candidate2 = kps_candidate2, kps_candidate1
-
+            # 两个端点连线的limb的 paf >0
             if self.pafs[view][paf_id][kps_candidate1][kps_candidate2] > 0:
                 check_cnt = check_cnt + 1
             else:
@@ -550,6 +566,7 @@ class GraphAssociate():
         for i in range(self.n_views):
             if i == view or person[kps_id, i] == -1:
                 continue
+            # 线线距离 也要满足 约束
             if self.m_epi_edges[kps_id][view][i][candidate,int(person[kps_id, i])] > 0:
                 check_cnt = check_cnt + 1
             else:
@@ -639,6 +656,11 @@ class GraphAssociate():
         self.mpersons_map.pop(slave_id)
 
     def clique2voting(self, clique, voting):
+        """
+        对clique中的所有bone包含的所有keypoints进行投票
+        如果keypoints有person_id对应(也就是assigned!=-1也就是 assigned=person_id)
+        则记上一票
+        """
         voting.vote = {}
         if len(self.mpersons_map) == 0:
             return voting
