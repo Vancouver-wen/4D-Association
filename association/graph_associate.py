@@ -267,6 +267,8 @@ class GraphAssociate():
                         available_node[index][self.n_views] = available_node[index - 1][self.n_views][:]
         cliques=list(filter(lambda x:(np.array(x.proposal)!=-1).sum()>=2,cliques))
         cliques=natsorted(cliques,key=lambda x:x.score,reverse=True)[:min(100,len(cliques))]
+        # for clique in cliques[:20]:
+        #     print(clique)
         # import pdb;pdb.set_trace()
         return cliques
 
