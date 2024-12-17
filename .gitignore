@@ -3,3 +3,8 @@ data/
 *.avi
 openpose/weight/
 myvis/
+build/
+include/
+library/
+.vscode/
+output/
